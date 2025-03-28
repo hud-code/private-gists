@@ -1,0 +1,476 @@
+Thought for 1 second### Detailed Optimization Explanations with Examples
+
+Let me walk through each optimization in detail with specific examples from your code:
+
+## 1. Moving GraphQL Client and Queries Outside Component
+
+**Before:**
+
+```javascript
+export const ViewCount = ({ poem, slug, spring }) => {
+  // Client created on every render
+  const graphqlClient = new GraphQLClient(process.env.NEXT_PUBLIC_GRAPHQL_URL);
+  
+  // Queries defined inside component, recreated on every render
+  const { data: viewCountData } = useSWR(
+    { query: POST_VIEW_COUNT, variables: { slug: slug } },
+    // ...
+  );
+}
+```
+
+**After:**
+
+```javascript
+// Created once, shared across all component instances
+const graphqlClient = new GraphQLClient(process.env.NEXT_PUBLIC_GRAPHQL_URL);
+
+// Defined once, not recreated on renders
+const POST_VIEW_COUNT = `
+  query PostViewCount($slug: String!) {
+    post(id: $slug, idType: SLUG) {
+      viewCount
+    }
+  }
+`;
+
+export const ViewCount = ({ poem, slug, spring }) => {
+  // Uses the shared client and query
+  const { data: viewCountData } = useSWR(
+    { query: POST_VIEW_COUNT, variables: { slug } },
+    // ...
+  );
+}
+```
+
+**Why it helps:**
+
+- The GraphQL client is only created once when the module is loaded, not on every render
+- Query strings are defined once, not recreated on every render
+- Reduces memory allocations and garbage collection
+
+
+## 2. Creating Debounced Function Outside Component
+
+**Before:**
+
+```javascript
+export const ViewCount = ({ poem, slug, spring }) => {
+  // Created on every render, causing memory churn
+  const debouncedUpdateServer = useCallback(
+    debounce(async (slug, newCount) => {
+      // ...update logic
+    }, 1000),
+    [updateViews]
+  );
+  
+  const handleRattleClick = async () => {
+    // ...
+    await debouncedUpdateServer(poem.slug, newViewCount);
+  };
+}
+```
+
+**After:**
+
+```javascript
+// Created once, reused across renders and components
+const createDebouncedFn = (fn, delay) => {
+  let timeoutId;
+  return (...args) => {
+    clearTimeout(timeoutId);
+    return new Promise((resolve) => {
+      timeoutId = setTimeout(() => resolve(fn(...args)), delay);
+    });
+  };
+};
+
+// Cache debounced functions by slug
+const updateViewsCache = {};
+const getUpdateViewsFn = (slug) => {
+  if (!updateViewsCache[slug]) {
+    updateViewsCache[slug] = createDebouncedFn(async (views) => {
+      // ...update logic
+    }, 1000);
+  }
+  return updateViewsCache[slug];
+};
+
+export const ViewCount = ({ poem, slug, spring }) => {
+  // Get existing or create new debounced function
+  const updateViews = useCallback(getUpdateViewsFn(slug), [slug]);
+  
+  const handleRattleClick = async () => {
+    // ...
+    await updateViews(newViewCount);
+  };
+}
+```
+
+**Why it helps:**
+
+- Prevents creating new debounced functions on every render
+- Caches functions by slug to reuse them
+- Reduces memory allocations and timer creation/destruction
+
+
+## 3. Using useCallback for Functions
+
+**Before:**
+
+```javascript
+export const Poem = ({ poem }) => {
+  // Recreated on every render
+  function shareAction() {
+    if (navigator.share) {
+      const data = { url: `https://www.rattle.com/${poem.slug}`, title: `Rattle — ${poem.title}` }
+      navigator.share(data);
+    }
+  }
+
+  // Recreated on every render
+  const copyLink = (e) => {
+    navigator.clipboard.writeText(`${base}/${poem.slug}`).then(() => {
+      const popover = document.getElementById('copy-popover');
+      popover.classList.toggle('copy-popover-open');
+      // ...
+    });
+  }
+  
+  return (
+    <>
+      <button onClick={shareAction}>Share</button>
+      <button onClick={copyLink}>Copy</button>
+    </>
+  );
+}
+```
+
+**After:**
+
+```javascript
+export const Poem = ({ poem }) => {
+  // Only recreated if dependencies change
+  const shareAction = useCallback(() => {
+    if (navigator.share) {
+      const data = { url: `${base}/${poem.slug}`, title: `Rattle — ${poem.title}` };
+      navigator.share(data);
+    }
+  }, [poem.slug, poem.title]);
+
+  // Only recreated if dependencies change
+  const copyLink = useCallback(() => {
+    navigator.clipboard.writeText(`${base}/${poem.slug}`).then(() => {
+      if (popoverRef.current) {
+        popoverRef.current.classList.toggle('copy-popover-open');
+        // ...
+      }
+    });
+  }, [poem.slug]);
+  
+  return (
+    <>
+      <button onClick={shareAction}>Share</button>
+      <button onClick={copyLink}>Copy</button>
+    </>
+  );
+}
+```
+
+**Why it helps:**
+
+- Functions are only recreated when their dependencies change
+- Prevents unnecessary re-renders of child components that receive these functions as props
+- Reduces function creation overhead
+
+
+## 4. Replacing Direct DOM Manipulation with Refs
+
+**Before:**
+
+```javascript
+const copyLink = (e) => {
+  navigator.clipboard.writeText(`${base}/${poem.slug}`).then(() => {
+    // Direct DOM manipulation
+    const popover = document.getElementById('copy-popover');
+    popover.classList.toggle('copy-popover-open');
+
+    setTimeout(() => { 
+      popover.classList.toggle('copy-popover-open'); 
+    }, 3000)
+  });
+}
+
+return (
+  <>
+    <button onClick={copyLink}>Copy</button>
+    <div id="copy-popover">Link copied!</div>
+  </>
+);
+```
+
+**After:**
+
+```javascript
+// Create ref
+const popoverRef = useRef(null);
+
+const copyLink = useCallback(() => {
+  navigator.clipboard.writeText(`${base}/${poem.slug}`).then(() => {
+    // Use ref instead of getElementById
+    if (popoverRef.current) {
+      popoverRef.current.classList.toggle('copy-popover-open');
+      
+      setTimeout(() => {
+        if (popoverRef.current) {
+          popoverRef.current.classList.toggle('copy-popover-open');
+        }
+      }, 3000);
+    }
+  });
+}, [poem.slug]);
+
+return (
+  <>
+    <button onClick={copyLink}>Copy</button>
+    <div ref={popoverRef} className="copy-popover">Link copied!</div>
+  </>
+);
+```
+
+**Why it helps:**
+
+- Avoids expensive DOM queries with `getElementById`
+- Follows React's paradigm for accessing DOM elements
+- Adds null checks to prevent errors if the ref isn't attached yet
+- More predictable in React's lifecycle
+
+
+## 5. Memoizing Expensive Functions
+
+**Before:**
+
+```javascript
+export const Poem = ({ poem }) => {
+  // Recalculated on every render
+  const poemFrom = () => {
+    if (
+      poem?.poemFrom?.fromPublication?.nodes[0]?.slug &&
+      poem?.poemFrom?.fromPublication?.nodes[0]?.name
+    ) {
+      return (/* JSX */);
+    }
+
+    if (poem?.poemFrom?.fromNonProductUrl && poem?.poemFrom?.fromNonProductTitle) {
+      return (/* JSX */);
+    }
+
+    return;
+  }
+  
+  return (
+    <>
+      {/* ... */}
+      {poemFrom()}
+      {/* ... */}
+    </>
+  );
+}
+```
+
+**After:**
+
+```javascript
+export const Poem = ({ poem }) => {
+  // Only recalculated when poem.poemFrom changes
+  const poemFrom = useCallback(() => {
+    if (
+      poem?.poemFrom?.fromPublication?.nodes[0]?.slug &&
+      poem?.poemFrom?.fromPublication?.nodes[0]?.name
+    ) {
+      return (/* JSX */);
+    }
+
+    if (poem?.poemFrom?.fromNonProductUrl && poem?.poemFrom?.fromNonProductTitle) {
+      return (/* JSX */);
+    }
+
+    return null;
+  }, [poem?.poemFrom]);
+  
+  return (
+    <>
+      {/* ... */}
+      {poemFrom()}
+      {/* ... */}
+    </>
+  );
+}
+```
+
+**Why it helps:**
+
+- Function is only recalculated when its dependencies change
+- Prevents unnecessary JSX creation and comparison
+- Returns explicit `null` instead of `undefined` for better predictability
+
+
+## 6. Adding Null Checks for Refs
+
+**Before:**
+
+```javascript
+const handleRattleClick = async () => {
+  // No null check
+  rattleButtonRef.current.classList.toggle("rattle-shake");
+  setTimeout(() => {
+    rattleButtonRef.current.classList.toggle("rattle-shake");
+  }, 300);
+  
+  // ...
+}
+```
+
+**After:**
+
+```javascript
+const handleRattleClick = async () => {
+  // With null check
+  if (rattleButtonRef.current) {
+    rattleButtonRef.current.classList.toggle("rattle-shake");
+    setTimeout(() => {
+      if (rattleButtonRef.current) {
+        rattleButtonRef.current.classList.toggle("rattle-shake");
+      }
+    }, 300);
+  }
+  
+  // ...
+}
+```
+
+**Why it helps:**
+
+- Prevents errors if the ref isn't attached yet
+- Handles edge cases like component unmounting during the timeout
+- More robust against race conditions
+
+
+## 7. Removing Unnecessary SWR Mutate Calls
+
+**Before:**
+
+```javascript
+const handleRattleClick = async () => {
+  // ...
+  
+  // Unnecessary mutate call
+  mutate(viewCountData, newViewCount, { revalidate: true });
+}
+```
+
+**After:**
+
+```javascript
+const handleRattleClick = async () => {
+  // ...
+  
+  // No unnecessary mutate call
+  // Local state is already updated with setLocalViewCount
+}
+```
+
+**Why it helps:**
+
+- Reduces function invocations
+- Prevents unnecessary revalidation
+- Simplifies state management
+
+
+## 8. Creating a Cache for Update Functions
+
+**Before:**
+
+```javascript
+// New function created for each component instance
+const updateViews = useCallback(async (slug, views) => {
+  try {
+    const data = await graphqlClient.request(UPDATE_VIEW_COUNT, {
+      slug,
+      views,
+    });
+    return data;
+  } catch (error) {
+    console.error("Error updating view count:", error);
+    throw error;
+  }
+}, []);
+```
+
+**After:**
+
+```javascript
+// Cache for update functions
+const updateViewsCache = {};
+const getUpdateViewsFn = (slug) => {
+  if (!updateViewsCache[slug]) {
+    updateViewsCache[slug] = createDebouncedFn(async (views) => {
+      try {
+        const data = await graphqlClient.request(UPDATE_VIEW_COUNT, {
+          slug,
+          views,
+        });
+        return data.updatePostView.views;
+      } catch (error) {
+        console.error("Error updating view count:", error);
+        throw error;
+      }
+    }, 1000);
+  }
+  return updateViewsCache[slug];
+};
+
+// In component:
+const updateViews = useCallback(getUpdateViewsFn(slug), [slug]);
+```
+
+**Why it helps:**
+
+- Reuses functions across renders and component instances
+- Prevents creating new debounced functions for the same slug
+- Reduces memory usage and garbage collection
+
+
+## Performance Impact Summary
+
+These optimizations collectively reduce:
+
+1. **Function Invocations**:
+
+1. Fewer function creations per render
+2. Fewer event handler executions
+3. Fewer timer creations
+4. Fewer GraphQL client creations
+
+
+
+2. **Function Duration**:
+
+1. Less time spent in garbage collection
+2. Less time spent creating new objects and functions
+3. Less time spent in React reconciliation
+4. More efficient DOM operations
+
+
+
+3. **Memory Usage**:
+
+1. Less memory churn from recreating functions and objects
+2. Better caching of expensive operations
+3. Fewer closures created
+
+
+
+
+
+By implementing these optimizations, your application should see a significant reduction in both function invocations and duration, leading to better performance and user experience.
